@@ -16,15 +16,15 @@ use Time::HiRes;
 sub usage();
 sub tcp_server();
 sub tcp_client();
-sub tcp_passive_open();
+sub tcp_active_open();
 sub udp_server();
 sub udp_client();
 sub mywrite($$);
 sub myread($);
 
-sub _format_log_params;
-sub _info;
-sub _error;
+sub _format_log_params($;@);
+sub _info(@);
+sub _error(@);
 
 
 my %opts = (
@@ -32,7 +32,7 @@ my %opts = (
     "client" => 0,
     "logfile" => "STDOUT",
     "port" => 9876,
-    "sleep-before-listen" => 30,
+    "sleep-before-listen" => 5,
     "server" => 1,
     "service" => "echo",
     "tcp" => 1,
@@ -158,8 +158,8 @@ sub tcp_server_child() {
   my $peer_addr = inet_ntoa $peer_netaddr;
 
   _info "accept $peer_addr:$peer_port";
+  my $buf = "";
   while (1) {
-    my $buf = "";
     my $n = sysread $session, $buf, 1024, length($buf);
     if (!defined $n) {
       _error "socket read error, $!";
@@ -169,14 +169,12 @@ sub tcp_server_child() {
       last;
     }
 
-    my $log_buf = $buf;
-    $log_buf =~ s/\r/\\r/;
-    $log_buf =~ s/\n/\\n/;
-    _info "receive --> ($n) $log_buf";
+    my $diff = length($buf) - $n;
+    _info "receive --> ($n/$diff) $buf";
 
     if ($service eq "echo") {
       my $write_err = 0;
-      if ($buf =~ /(.*)[^\r\n][\r\n]+(.*)$/) {
+      if ($buf =~ /(.*[^\r\n])[\r\n]+([^\r\n]*)$/ms) {
         $buf = "";
         $buf = $2 if defined $2;
         $n = syswrite $session, "REPLY with --> " . $1 . "\r\n";
@@ -205,13 +203,13 @@ sub tcp_client() {
   my $thread_num = $opts{"thread-num"};
 
   if ($thread_num == 1) {
-    tcp_passive_open;
+    tcp_active_open;
     return ;
   }
 
   my @workers;
   for my $i (1 .. $thread_num) {
-    my $thread = threads->create("tcp_passive_open");
+    my $thread = threads->create("tcp_active_open");
     # $thread->detach();
     push @workers, $thread;
   }
@@ -231,7 +229,7 @@ sub udp_client() {
 }
 
 
-sub tcp_passive_open() {
+sub tcp_active_open() {
   my $server_ip = $opts{ip};
   my $server_port = $opts{port};
 
@@ -239,6 +237,10 @@ sub tcp_passive_open() {
   my $host = inet_aton $server_ip;
   my $dest_addr = sockaddr_in $server_port, $host;
   connect $fd, $dest_addr or die;
+
+  mywrite $fd, "123";
+  sleep 1;
+  mywrite $fd, "456\r\n";
 
   mywrite $fd, "hello world\r\n";
   myread $fd or die;
@@ -286,21 +288,28 @@ sub mywrite($$) {
 }
 
 
-sub _format_log_params {
+sub _format_log_params($;@) {
+  my $with_service = shift;
   my @params = @_;
   my @bufs = map { s/\r/\\r/g; s/\n/\\n/g; $_ } @params;
   my ($sec, $msec) = Time::HiRes::gettimeofday;
-  my $time = sprintf "%s.%06d", POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime($sec)), $msec;
+  my $time = sprintf "%s.%06d",
+      POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime($sec)), $msec;
+
+  if ($with_service) {
+    unshift @bufs, "[$opts{service}]";
+  }
+
   unshift @bufs, $time;
   join " ", @bufs;
 }
 
 
-sub _info {
-  Log::Message::Simple::msg _format_log_params(@_), 1;
+sub _info(@) {
+  Log::Message::Simple::msg _format_log_params(1, @_), 1;
 }
 
 
-sub _error {
-  Log::Message::Simple::error _format_log_params(@_), 1;
+sub _error(@) {
+  Log::Message::Simple::error _format_log_params(1, @_), 1;
 }
