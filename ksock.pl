@@ -22,6 +22,8 @@ sub udp_client();
 sub mywrite($$);
 sub myread($);
 
+sub socket_set_reuseaddr($);
+sub socket_set_linger($$);
 sub _format_log_params($;@);
 sub _info(@);
 sub _error(@);
@@ -65,7 +67,7 @@ GetOptions(\%opts,
     "service=s",
     "sleep-before-listen=i",
     "tcp",
-    "thread-num",
+    "thread-num=i",
     "udp",
   ) or die usage;
 
@@ -149,7 +151,7 @@ sub tcp_server() {
 
   socket my $sockfd, AF_INET, SOCK_STREAM, 0 or die "open socket error, $!";
   if ($reuseaddr) {
-    setsockopt $sockfd, SOL_SOCKET, SO_REUSEADDR, 1 or die "reuseaddr error, $!";
+    socket_set_reuseaddr $reuseaddr;
   }
 
   my $addr = sockaddr_in $port, INADDR_ANY;
@@ -252,6 +254,7 @@ sub udp_client() {
 }
 
 
+
 sub tcp_active_open() {
   my $server_ip = $opts{ip};
   my $server_port = $opts{port};
@@ -262,7 +265,7 @@ sub tcp_active_open() {
   socket my $fd, AF_INET, SOCK_STREAM, 0 or die;
 
   if ($reuseaddr) {
-    setsockopt $fd, SOL_SOCKET, SO_REUSEADDR, 1 or die "reuseaddr error, $!";
+    socket_set_reuseaddr($fd);
   }
 
   if ($bind) {
@@ -294,8 +297,7 @@ sub tcp_active_open() {
   myread $fd or die;
 
   if (defined $linger_time) {
-    setsockopt $fd, SOL_SOCKET, SO_LINGER, pack("II", 1, $linger_time)
-        or die "linger error, $!";
+    socket_set_linger $fd, $linger_time;
 
   } else {
     sleep 1;
@@ -336,6 +338,22 @@ sub mywrite($$) {
 }
 
 
+sub socket_set_reuseaddr($) {
+  my ($fd) = @_;
+
+  setsockopt $fd, SOL_SOCKET, SO_REUSEADDR, 1
+      or die "reuseaddr error, $!";
+}
+
+
+sub socket_set_linger($$) {
+  my ($fd, $timeout) = @_;
+
+  setsockopt $fd, SOL_SOCKET, SO_LINGER, pack("II", 1, $timeout)
+      or die "set linger error, $!";
+}
+
+
 sub _format_log_params($;@) {
   my $with_service = shift;
   my @params = @_;
@@ -361,3 +379,4 @@ sub _info(@) {
 sub _error(@) {
   Log::Message::Simple::error _format_log_params(1, @_), 1;
 }
+
