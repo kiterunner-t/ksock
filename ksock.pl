@@ -27,11 +27,20 @@ sub _info(@);
 sub _error(@);
 
 
+use constant {
+    KSHUT_RD => 0,
+    KSHUT_WD => 1,
+    KSHUT_RDWD => 2,
+  };
+
+
 my %opts = (
     "backlog" => 5,
+    "bind" => 0,
     "client" => 0,
     "logfile" => "STDOUT",
     "port" => 9876,
+    "reuseaddr" => 0,
     "sleep-before-listen" => 5,
     "server" => 1,
     "service" => "echo",
@@ -43,10 +52,15 @@ my %opts = (
 Getopt::Long::Configure("bundling");
 GetOptions(\%opts,
     "backlog=i",
+    "bind",
     "client",
+    "client-host=s",
+    "client-port=i",
     "help|h",
+    "linger=i",
     "logfile=s",
     "port=i",
+    "reuseaddr",
     "server",
     "service=s",
     "sleep-before-listen=i",
@@ -71,6 +85,7 @@ Usage:
 
 General options:
     --help, -h
+    --reuseaddr   when running as client, --bind should be setted
     --tcp, --udp
 
 Server options:
@@ -79,8 +94,12 @@ Server options:
     --sleep-before-listen=<sleep-seconds> the default is 30
 
 Client options:
+    --bind
     --client
-    --thread-num  for tcp client, default is 1
+    --client-host=<ip>
+    --client-port=<port>
+    --linger=<time>
+    --thread-num=<num>  for tcp client, default is 1
 
 Examples:
     perl ksock.pl --tcp --server 9876
@@ -126,9 +145,13 @@ sub tcp_server() {
   my $port = $opts{port};
   my $backlog = $opts{backlog};
   my $sleep_before_listen = $opts{"sleep-before-listen"};
+  my $reuseaddr = $opts{reuseaddr};
 
   socket my $sockfd, AF_INET, SOCK_STREAM, 0 or die "open socket error, $!";
-  setsockopt $sockfd, SOL_SOCKET, SO_REUSEADDR, 1 or die "set reuseaddr error, $!";
+  if ($reuseaddr) {
+    setsockopt $sockfd, SOL_SOCKET, SO_REUSEADDR, 1 or die "reuseaddr error, $!";
+  }
+
   my $addr = sockaddr_in $port, INADDR_ANY;
   bind $sockfd, $addr or die "bind $sockfd in $port error, $!";
   listen $sockfd, $backlog or die "listen $sockfd error, $!";
@@ -232,11 +255,30 @@ sub udp_client() {
 sub tcp_active_open() {
   my $server_ip = $opts{ip};
   my $server_port = $opts{port};
+  my $bind = $opts{bind};
+  my $reuseaddr = $opts{reuseaddr};
+  my $linger_time = $opts{linger};
 
   socket my $fd, AF_INET, SOCK_STREAM, 0 or die;
+
+  if ($reuseaddr) {
+    setsockopt $fd, SOL_SOCKET, SO_REUSEADDR, 1 or die "reuseaddr error, $!";
+  }
+
+  if ($bind) {
+    my $client_port = $opts{"client-port"};
+    my $client_host_str = $opts{"client-host"};
+    my $client_host = INADDR_ANY;
+    if (defined $client_host_str) {
+      $client_host = inet_aton $client_host_str or die "inet_aton error, $!";
+    }
+    my $client_addr = sockaddr_in $client_port, $client_host;
+    bind $fd, $client_addr or die "bind clientaddr error, $!";
+  }
+
   my $host = inet_aton $server_ip;
   my $dest_addr = sockaddr_in $server_port, $host;
-  connect $fd, $dest_addr or die;
+  connect $fd, $dest_addr or die "connect error, $!";
 
   mywrite $fd, "123";
   sleep 1;
@@ -245,14 +287,20 @@ sub tcp_active_open() {
   mywrite $fd, "hello world\r\n";
   myread $fd or die;
 
-  shutdown $fd, 0;
+#  shutdown $fd, KSHUT_RD;
   sleep 1;
 
   mywrite $fd, "again hello world\r\n" or die;
   myread $fd or die;
 
-  sleep 1;
-  close $fd;
+  if (defined $linger_time) {
+    setsockopt $fd, SOL_SOCKET, SO_LINGER, pack("II", 1, $linger_time)
+        or die "linger error, $!";
+
+  } else {
+    sleep 1;
+    close $fd;
+  }
 }
 
 
