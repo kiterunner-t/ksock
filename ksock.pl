@@ -15,6 +15,7 @@ use Time::HiRes;
 
 sub usage();
 sub tcp_server();
+sub tcp_server_child($$);
 sub tcp_client();
 sub tcp_active_open();
 sub udp_server();
@@ -27,6 +28,7 @@ sub socket_set_linger($$);
 sub _format_log_params($;@);
 sub _info(@);
 sub _error(@);
+sub _dumpvalue;
 
 
 use constant {
@@ -58,6 +60,8 @@ GetOptions(\%opts,
     "client",
     "client-host=s",
     "client-port=i",
+    "debug",
+    "fork",
     "help|h",
     "linger=i",
     "logfile=s",
@@ -71,8 +75,17 @@ GetOptions(\%opts,
     "udp",
   ) or die usage;
 
-$opts{ip} = $ARGV[0];
+my $argv_num = scalar @ARGV;
+usage if $opts{client} && $argv_num<2;
 
+if ($argv_num == 1) {
+  $opts{port} = $ARGV[0];
+} elsif ($argv_num >= 2) {
+  $opts{ip} = $ARGV[0];
+  $opts{port} = $ARGV[1];
+}
+
+_dumpvalue \%opts;
 usage if $opts{help};
 
 sub usage() {
@@ -80,13 +93,15 @@ sub usage() {
 
 Usage:
     perl ksock.pl [options] port  <=> --server --tcp [options] port
-    perl ksock.pl --tcp --server [options] [port]
+    perl ksock.pl --tcp --server [options] [ip] [port]
     perl ksock.pl --tcp --client [options] ip [port]
-    perl ksock.pl --udp --server [options] [port]
+    perl ksock.pl --udp --server [options] [ip] [port]
     perl ksock.pl --udp --client [options] ip [port]
 
 General options:
     --help, -h
+    --debug
+    --fork        use process not thread to handle multi clients request
     --reuseaddr   when running as client, --bind should be setted
     --tcp, --udp
 
@@ -127,6 +142,20 @@ if ($opts{logfile} ne "STDOUT") {
 local $Log::Message::Simple::MSG_FH = $logfd;
 local $Log::Message::Simple::ERROR_FH = $logfd;
 
+
+sub wait_children() {
+  while (1) {
+    my $pid = wait;
+    last if $pid == -1;
+    _info "$pid exit";
+  }
+}
+
+
+if (defined $opts{fork}) {
+  $SIG{CHLD} = \&wait_children;
+}
+
 if ($opts{tcp}) {
   if ($opts{client}) {
     tcp_client;
@@ -144,17 +173,25 @@ if ($opts{tcp}) {
 
 
 sub tcp_server() {
+  my $ip = $opts{ip};
   my $port = $opts{port};
   my $backlog = $opts{backlog};
   my $sleep_before_listen = $opts{"sleep-before-listen"};
   my $reuseaddr = $opts{reuseaddr};
+  my $use_fork = $opts{fork};
 
   socket my $sockfd, AF_INET, SOCK_STREAM, 0 or die "open socket error, $!";
   if ($reuseaddr) {
     socket_set_reuseaddr $reuseaddr;
   }
 
-  my $addr = sockaddr_in $port, INADDR_ANY;
+  my $addr;
+  if (defined $ip) {
+    $addr = sockaddr_in $port, inet_aton($ip);
+  } else {
+    $addr = sockaddr_in $port, INADDR_ANY;
+  }
+
   bind $sockfd, $addr or die "bind $sockfd in $port error, $!";
   listen $sockfd, $backlog or die "listen $sockfd error, $!";
 
@@ -169,13 +206,24 @@ sub tcp_server() {
   while (1) {
     my $session;
     next unless my $remote_addr = accept $session, $sockfd;
-    my $thread = threads->create("tcp_server_child", $session, $remote_addr);
-    $thread->detach();
+    if (defined $use_fork) {
+      my $pid = fork;
+      die "fork error, $!" if !defined $pid;
+      if ($pid == 0) {
+        close $sockfd;
+        tcp_server_child $session, $remote_addr or die;
+        exit;
+      }
+
+    } else {
+      my $thread = threads->create("tcp_server_child", $session, $remote_addr);
+      $thread->detach();
+    }
   }
 }
 
 
-sub tcp_server_child() {
+sub tcp_server_child($$) {
   my ($session, $remote_addr) = @_;
   my $service = $opts{service};
 
@@ -264,11 +312,8 @@ sub tcp_active_open() {
 
   socket my $fd, AF_INET, SOCK_STREAM, 0 or die;
 
-  if ($reuseaddr) {
-    socket_set_reuseaddr($fd);
-  }
-
   if ($bind) {
+    socket_set_reuseaddr $fd if $reuseaddr;
     my $client_port = $opts{"client-port"};
     my $client_host_str = $opts{"client-host"};
     my $client_host = INADDR_ANY;
@@ -378,5 +423,13 @@ sub _info(@) {
 
 sub _error(@) {
   Log::Message::Simple::error _format_log_params(1, @_), 1;
+}
+
+
+sub _dumpvalue {
+  return if !defined $opts{debug};
+
+  use Dumpvalue;
+  Dumpvalue->new->dumpValues(@_);
 }
 
