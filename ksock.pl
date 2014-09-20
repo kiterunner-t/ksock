@@ -24,7 +24,9 @@ sub mywrite($$);
 sub myread($);
 
 sub socket_set_reuseaddr($);
+sub socket_set_buffersize($$$);
 sub socket_set_linger($$);
+sub socket_set_debug($);
 sub _format_log_params($;@);
 sub _info(@);
 sub _error(@);
@@ -44,13 +46,14 @@ my %opts = (
     "client" => 0,
     "logfile" => "STDOUT",
     "port" => 9876,
-    "reuseaddr" => 0,
+    "reuseaddr" => 1,
     "sleep-before-listen" => 5,
     "server" => 1,
     "service" => "echo",
     "tcp" => 1,
     "thread-num" => 1,
     "udp" => 0,
+    "usleep-before-echo" => 0,
   );
 
 Getopt::Long::Configure("bundling");
@@ -61,18 +64,20 @@ GetOptions(\%opts,
     "client-host=s",
     "client-port=i",
     "debug",
+    "echo-by-package",
     "fork",
     "help|h",
     "linger=i",
     "logfile=s",
     "port=i",
-    "reuseaddr",
+    "reuseaddr!",
     "server",
     "service=s",
     "sleep-before-listen=i",
     "tcp",
     "thread-num=i",
     "udp",
+    "usleep-before-echo=i",
   ) or die usage;
 
 my $argv_num = scalar @ARGV;
@@ -106,6 +111,7 @@ General options:
     --tcp, --udp
 
 Server options:
+    --echo-by-package
     --server
     --service=<service>   echo(default), discard
     --sleep-before-listen=<sleep-seconds> the default is 30
@@ -179,11 +185,11 @@ sub tcp_server() {
   my $sleep_before_listen = $opts{"sleep-before-listen"};
   my $reuseaddr = $opts{reuseaddr};
   my $use_fork = $opts{fork};
+  my $debug = $opts{debug};
 
   socket my $sockfd, AF_INET, SOCK_STREAM, 0 or die "open socket error, $!";
-  if ($reuseaddr) {
-    socket_set_reuseaddr $reuseaddr;
-  }
+  socket_set_reuseaddr $sockfd if $reuseaddr;
+  socket_set_debug $sockfd if defined $debug;
 
   my $addr;
   if (defined $ip) {
@@ -226,6 +232,8 @@ sub tcp_server() {
 sub tcp_server_child($$) {
   my ($session, $remote_addr) = @_;
   my $service = $opts{service};
+  my $echo_bypackage = $opts{"echo-by-package"};
+  my $usleep_before_echo = $opts{"usleep-before-echo"};
 
   my ($peer_port, $peer_netaddr) = sockaddr_in $remote_addr;
   my $peer_addr = inet_ntoa $peer_netaddr;
@@ -246,18 +254,29 @@ sub tcp_server_child($$) {
     _info "receive --> ($n/$diff) $buf";
 
     if ($service eq "echo") {
-      my $write_err = 0;
-      if ($buf =~ /(.*[^\r\n])[\r\n]+([^\r\n]*)$/ms) {
+      if (defined $echo_bypackage) {
+        $buf =~ s/[\r\n]+$//;
+        Time::HiRes::usleep $usleep_before_echo if $usleep_before_echo > 0;
+        $n = syswrite $session, "REPLY with --> $buf\r\n";
         $buf = "";
-        $buf = $2 if defined $2;
-        $n = syswrite $session, "REPLY with --> " . $1 . "\r\n";
         if (!defined $n) {
           _error "write fd error, $!";
           last;
         }
 
       } else {
-        next;
+        if ($buf =~ /(.*[^\r\n])[\r\n]+([^\r\n]*)$/ms) {
+          $buf = "";
+          $buf = $2 if defined $2;
+          $n = syswrite $session, "REPLY with --> " . $1 . "\r\n";
+          if (!defined $n) {
+            _error "write fd error, $!";
+            last;
+          }
+
+        } else {
+          next;
+        }
       }
 
     } elsif ($service eq "discard") {
@@ -295,10 +314,12 @@ sub tcp_client() {
 
 
 sub udp_server() {
+
 }
 
 
 sub udp_client() {
+
 }
 
 
@@ -309,6 +330,8 @@ sub tcp_active_open() {
   my $bind = $opts{bind};
   my $reuseaddr = $opts{reuseaddr};
   my $linger_time = $opts{linger};
+  my $block = $opts{block};
+  my $block_num = $opts{"block-num"};
 
   socket my $fd, AF_INET, SOCK_STREAM, 0 or die;
 
@@ -324,22 +347,35 @@ sub tcp_active_open() {
     bind $fd, $client_addr or die "bind clientaddr error, $!";
   }
 
+  # set send and recv buffer
+
   my $host = inet_aton $server_ip;
   my $dest_addr = sockaddr_in $server_port, $host;
   connect $fd, $dest_addr or die "connect error, $!";
 
-  mywrite $fd, "123";
-  sleep 1;
-  mywrite $fd, "456\r\n";
+  # 1) block data
+  # 2) interactive data
+  #    a) character by character
+  #    b) line by line
+  if (defined $block) {
+    for my $i (1 .. $block_num) {
+      mywrite $fd, "x" x 1024;
+    }
 
-  mywrite $fd, "hello world\r\n";
-  myread $fd or die;
+  } else {
+    mywrite $fd, "123";
+    sleep 1;
+    mywrite $fd, "456\r\n";
+
+    mywrite $fd, "hello world\r\n";
+    myread $fd or die;
 
 #  shutdown $fd, KSHUT_RD;
-  sleep 1;
+    sleep 1;
 
-  mywrite $fd, "again hello world\r\n" or die;
-  myread $fd or die;
+    mywrite $fd, "again hello world\r\n" or die;
+    myread $fd or die;
+  }
 
   if (defined $linger_time) {
     socket_set_linger $fd, $linger_time;
@@ -391,11 +427,32 @@ sub socket_set_reuseaddr($) {
 }
 
 
+sub socket_set_buffersize($$$) {
+  my ($fd, $recvbuf_size, $sendbuf_size) = @_;
+
+  setsockopt $fd, SOL_SOCKET, SO_RCVBUF, $recvbuf_size
+      or die "set recv buffer size error, $!";
+  setsockopt $fd, SOL_SOCKET, SO_SNDBUF, $sendbuf_size
+      or die "set send buffer size error, $!";
+}
+
+
 sub socket_set_linger($$) {
   my ($fd, $timeout) = @_;
 
   setsockopt $fd, SOL_SOCKET, SO_LINGER, pack("II", 1, $timeout)
       or die "set linger error, $!";
+}
+
+
+sub socket_set_debug($) {
+  my ($fd) = @_;
+
+  setsockopt $fd, SOL_SOCKET, SO_DEBUG, 1
+      or die "set socket debug error, $!";
+
+  my $packed = getsockopt $fd, SOL_SOCKET, SO_DEBUG or die;
+  die "open sodebug error, $!" if !unpack "I", $packed;
 }
 
 
